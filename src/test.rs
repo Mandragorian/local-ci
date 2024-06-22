@@ -89,14 +89,10 @@ impl Manager {
     // not already tested or being tested.
     pub fn set_revisions<I: IntoIterator<Item = CommitHash>>(&mut self, revs: I) {
         let mut to_start = HashSet::<CommitHash>::from_iter(revs);
-        let mut cancel_revs = Vec::new();
-        for rev in self.job_cts.keys() {
-            // We're already testing rev, so we don't need to kick it off below.
-            if !to_start.remove(rev) {
-                // This rev is being tested but wasn't in rev_set.
-                cancel_revs.push(rev.clone())
-            }
-        }
+        let cancel_revs = self.job_cts.keys()
+        .filter(|rev| !to_start.remove(rev))
+        .map(|r| r.clone())
+        .collect::<Vec<_>>();
         info!("Starting {:?}, cancelling {:?}", to_start, cancel_revs);
         for rev in cancel_revs {
             self.job_cts[&rev].cancel();
