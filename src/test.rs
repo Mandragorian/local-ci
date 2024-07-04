@@ -7,7 +7,6 @@ use std::ffi::OsString;
 use std::pin::pin;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use anyhow::{anyhow, Context};
 use futures::future::{self, try_join_all, Either};
@@ -151,23 +150,23 @@ impl Drop for Manager {
 struct JobCounter {
     // The first item in the pair is the counter; when it goes to zero the Sender will send a
     // message.
-    pair: Arc<Mutex<(usize, watch::Sender<()>)>>,
+    w: watch::Sender<usize>,
 }
 
 impl JobCounter {
     pub fn new() -> Self {
         Self {
-            pair: Arc::new(Mutex::new((0, watch::Sender::new(())))),
+            w: watch::Sender::new(0),
         }
     }
 
     // Increment the counter. It is decremented when the token is dropped.
     pub fn get(&self) -> JobToken {
-        let mut guard = self.pair.lock().unwrap();
-        let (ref mut count, _) = &mut *guard;
-        *count += 1;
+        self.w.send_modify(|count| {
+            *count += 1;
+        });
         JobToken {
-            pair: self.pair.clone(),
+            w: self.w.clone(),
         }
     }
 
@@ -175,30 +174,33 @@ impl JobCounter {
     // Block until the counter is zero. If it's already zero, return immediately.
     pub async fn zero(&self) {
         let mut rx = {
-            let mut guard = self.pair.lock().unwrap();
-            let (count, ref sender) = &mut *guard;
-            if *count == 0 {
+            if *self.w.borrow() == 0 {
                 return;
             }
-            sender.subscribe()
+            self.w.subscribe()
         };
-        rx.changed().await.expect("sender dropped in job counter");
+        rx.wait_for(|c| *c == 0).await.expect("sender dropped in job counter");
     }
 }
 
 struct JobToken {
     // I'm not sure if there's some way to de-duplicate the contents of this struct against the main
     // JobCounter?
-    pair: Arc<Mutex<(usize, watch::Sender<()>)>>,
+    // pair: Arc<Mutex<(usize, watch::Sender<()>)>>,
+    w: watch::Sender<usize>,
 }
 
 impl Drop for JobToken {
     fn drop(&mut self) {
-        let mut guard = self.pair.lock().unwrap();
-        let (ref mut count, ref tx) = &mut *guard;
-        *count -= 1;
-        if *count == 0 && tx.receiver_count() > 0 {
-            tx.send(()).expect("receiver err in job counter");
+        //let mut guard = self.pair.lock().unwrap();
+        //let (ref mut count, ref tx) = &mut *guard;
+        let mut count = 0;
+        self.w.send_modify(|c| {
+            count = *c;
+            *c -= 1;
+        });
+        if count == 0 && self.w.receiver_count() > 0 {
+            self.w.send(0).expect("receiver err in job counter");
         }
     }
 }
